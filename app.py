@@ -250,6 +250,7 @@ for key, default in [
     ("model_filename", None), ("model_name", None),
     ("score", None), ("task", "classification"),
     ("train_time", None), ("pkl_bytes", None),
+    ("dropped_cols", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -280,6 +281,9 @@ with st.sidebar:
         st.caption(f"**{st.session_state.model_name}**")
         st.caption(f"Score: **{st.session_state.score:.4f}**")
 
+    if st.session_state.dropped_cols:
+        st.warning(f"⚠ {len(st.session_state.dropped_cols)} col(s) excluded")
+
     st.divider()
 
     # EDA options (only when dataset loaded)
@@ -308,8 +312,8 @@ st.divider()
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab_data, tab_eda, tab_train, tab_predict = st.tabs([
-    "01 · DATA", "02 · EXPLORE", "03 · TRAIN", "04 · PREDICT"
+tab_data, tab_eda, tab_engineer, tab_train, tab_predict = st.tabs([
+    "01 · DATA", "02 · EXPLORE", "03 · ENGINEER", "04 · TRAIN", "05 · PREDICT"
 ])
 
 
@@ -469,8 +473,89 @@ with tab_eda:
             plt.close()
 
 
+
 # ══════════════════════════════════════════════
-# TAB 3 · TRAIN
+# TAB 3 · ENGINEER
+# ══════════════════════════════════════════════
+with tab_engineer:
+    if st.session_state.df is None:
+        st.info("Upload a dataset first in the **DATA** tab.")
+    else:
+        df = st.session_state.df
+        target = st.session_state.target or df.columns[-1]
+
+        section_title("AUTO-DETECT", "ID-like columns (high cardinality)")
+
+        st.markdown("""
+        <div style="font-size:0.8rem;color:#718096;margin-bottom:1.2rem;font-family:'Space Mono',monospace">
+        Columns where unique values ≥ 95% of rows are likely identifiers (IDs, names, hashes) that
+        add no signal to the model and should be dropped.
+        </div>""", unsafe_allow_html=True)
+
+        # Auto-detect: unique ratio >= 0.95, excluding target
+        feature_cols = [c for c in df.columns if c != target]
+        unique_ratio = df[feature_cols].nunique() / len(df)
+        auto_flagged = unique_ratio[unique_ratio >= 0.95].index.tolist()
+
+        # Build summary table for all feature columns
+        col_summary = pd.DataFrame({
+            "Column": feature_cols,
+            "Type": df[feature_cols].dtypes.astype(str).values,
+            "Unique": df[feature_cols].nunique().values,
+            "Unique %": (unique_ratio.values * 100).round(1),
+            "Auto-flagged": ["⚠️ ID-like" if c in auto_flagged else "✓ OK" for c in feature_cols],
+        })
+
+        st.dataframe(col_summary, use_container_width=True, height=280, hide_index=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        section_title("SELECT", "Choose columns to drop before training")
+
+        # Pre-select auto-flagged, user can override
+        cols_to_drop = st.multiselect(
+            "Columns to exclude from training",
+            options=feature_cols,
+            default=[c for c in auto_flagged if c in feature_cols],
+            help="Auto-flagged columns are pre-selected. You can add or remove any column.",
+        )
+
+        # Preview
+        if cols_to_drop:
+            st.markdown("<br>", unsafe_allow_html=True)
+            d1, d2, d3 = st.columns(3)
+            remaining = [c for c in feature_cols if c not in cols_to_drop]
+            d1.markdown(stat_card("Dropping", str(len(cols_to_drop)), "columns"), unsafe_allow_html=True)
+            d2.markdown(stat_card("Remaining", str(len(remaining)), "feature columns"), unsafe_allow_html=True)
+            d3.markdown(stat_card("Target", str(target), "kept"), unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.expander("👁  Preview training-ready dataset"):
+                preview_df = df.drop(columns=cols_to_drop)
+                st.dataframe(preview_df.head(20), use_container_width=True, height=260)
+        else:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.success("✓ No columns dropped — all features will be used for training.")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("✅ Confirm & Save Column Selection", type="primary"):
+            st.session_state.dropped_cols = cols_to_drop
+            st.session_state.model = None  # reset model when features change
+            if cols_to_drop:
+                st.success(f"Saved! {len(cols_to_drop)} column(s) will be excluded from training: {', '.join(cols_to_drop)}")
+            else:
+                st.success("Saved! All feature columns will be used.")
+
+        # Show current saved state
+        if st.session_state.dropped_cols:
+            st.markdown("<br>", unsafe_allow_html=True)
+            chips = "".join(f'<span class="model-chip" style="background:rgba(255,107,53,0.15);color:#ff6b35;border:1px solid #ff6b35">{c}</span>' for c in st.session_state.dropped_cols)
+            st.markdown(f"""
+            <div style="font-size:0.65rem;letter-spacing:0.1em;text-transform:uppercase;color:#4a5568;margin-bottom:0.4rem">Currently excluded</div>
+            <div>{chips}</div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════
+# TAB 4 · TRAIN
 # ══════════════════════════════════════════════
 with tab_train:
     if st.session_state.df is None:
@@ -479,13 +564,18 @@ with tab_train:
         df = st.session_state.df
         target = st.session_state.target or df.columns[-1]
         task = st.session_state.task or "classification"
+        dropped = st.session_state.dropped_cols or []
+
+        # Apply dropped columns
+        train_df = df.drop(columns=dropped) if dropped else df
 
         section_title("READY", "Training configuration summary")
 
-        s1, s2, s3 = st.columns(3)
+        s1, s2, s3, s4 = st.columns(4)
         s1.markdown(stat_card("Target", str(target)), unsafe_allow_html=True)
         s2.markdown(stat_card("Task", task.upper()), unsafe_allow_html=True)
-        s3.markdown(stat_card("Features", str(df.shape[1] - 1)), unsafe_allow_html=True)
+        s3.markdown(stat_card("Features", str(train_df.shape[1] - 1)), unsafe_allow_html=True)
+        s4.markdown(stat_card("Dropped", str(len(dropped)), "columns excluded"), unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -511,7 +601,7 @@ with tab_train:
                     progress.progress(i * 2)
                 st.write("🧠 Running GridSearchCV across all models…")
                 start = time.time()
-                model, score, model_name = train_automl(df, target, task)
+                model, score, model_name = train_automl(train_df, target, task)
                 end = time.time()
                 elapsed = round(end - start, 2)
                 for i in range(50, 101):
@@ -583,7 +673,9 @@ with tab_predict:
         df = st.session_state.df
         target = st.session_state.target
         model = st.session_state.model
-        feature_cols = df.drop(columns=[target]).columns.tolist()
+        dropped = st.session_state.dropped_cols or []
+        predict_df = df.drop(columns=dropped) if dropped else df
+        feature_cols = predict_df.drop(columns=[target]).columns.tolist()
 
         pred_tab1, pred_tab2 = st.tabs(["BATCH PREDICTION", "ROW PREDICTION"])
 
@@ -598,8 +690,8 @@ with tab_predict:
 
             if st.button("▶ Run batch prediction", use_container_width=False):
                 with st.spinner("Predicting…"):
-                    preds = model.predict(df[feature_cols])
-                    result_df = df.copy()
+                    preds = model.predict(predict_df[feature_cols])
+                    result_df = predict_df.copy()
                     result_df["⚡ Prediction"] = preds
 
                 st.success(f"✓ {len(preds):,} predictions generated")
@@ -634,33 +726,39 @@ with tab_predict:
             st.markdown('<div style="font-size:0.78rem;color:#718096;margin-bottom:1.2rem;font-family:\'Space Mono\',monospace">Fill in the fields below and hit Predict.</div>', unsafe_allow_html=True)
 
             input_data = {}
-            num_feats = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df[c])]
-            cat_feats = [c for c in feature_cols if not pd.api.types.is_numeric_dtype(df[c])]
+            num_feats = [f for f in feature_cols if pd.api.types.is_numeric_dtype(df[f])]
+            cat_feats = [f for f in feature_cols if not pd.api.types.is_numeric_dtype(df[f])]
 
             if num_feats:
                 st.markdown('<div style="font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;color:#4a5568;margin-bottom:0.5rem">Numeric features</div>', unsafe_allow_html=True)
-                cols = st.columns(min(4, len(num_feats)))
-                for i, col in enumerate(num_feats):
-                    with cols[i % len(cols)]:
-                        med_val = float(df[col].median())
-                        input_data[col] = st.number_input(
-                            col, value=med_val,
-                            help=f"Median: {med_val:.3f} | Range: [{df[col].min():.3f}, {df[col].max():.3f}]"
+                num_grid = st.columns(min(4, len(num_feats)))
+                for idx, feat_name in enumerate(num_feats):
+                    with num_grid[idx % len(num_grid)]:
+                        med_val = float(df[feat_name].median())
+                        input_data[feat_name] = st.number_input(
+                            feat_name,
+                            value=med_val,
+                            key=f"num_input_{feat_name}",
+                            help=f"Median: {med_val:.3f} | Range: [{df[feat_name].min():.3f}, {df[feat_name].max():.3f}]"
                         )
 
             if cat_feats:
                 st.markdown('<br><div style="font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;color:#4a5568;margin-bottom:0.5rem">Categorical features</div>', unsafe_allow_html=True)
-                cols2 = st.columns(min(3, len(cat_feats)))
-                for i, col in enumerate(cat_feats):
-                    with cols2[i % len(cols2)]:
-                        options = df[col].dropna().unique().tolist()
+                cat_grid = st.columns(min(3, len(cat_feats)))
+                for idx, feat_name in enumerate(cat_feats):
+                    with cat_grid[idx % len(cat_grid)]:
+                        options = df[feat_name].dropna().unique().tolist()
                         if options:
-                            input_data[col] = st.selectbox(col, options)
+                            input_data[feat_name] = st.selectbox(
+                                feat_name, options, key=f"cat_input_{feat_name}"
+                            )
                         else:
-                            input_data[col] = st.text_input(col)
+                            input_data[feat_name] = st.text_input(
+                                feat_name, key=f"txt_input_{feat_name}"
+                            )
 
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("⚡ Predict this row", type="primary"):
+            if st.button("⚡ Predict this row", type="primary", key="row_predict_btn"):
                 try:
                     row_df = pd.DataFrame([input_data])
                     pred = model.predict(row_df[feature_cols])[0]
