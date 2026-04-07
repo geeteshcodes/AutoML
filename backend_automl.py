@@ -38,7 +38,6 @@ def build_preprocessor(X):
     numeric_transformer = Pipeline([
         ('imputer', SimpleImputer(strategy="mean")),
         ('scaler', StandardScaler()),
-        ('pca', PCA(n_components=min(len(numeric_features), 5)))
     ])
 
     onehot_transformer = Pipeline([
@@ -81,7 +80,7 @@ def train_automl(df, target, task="classification"):
             {'model':[AdaBoostClassifier()]},
             {'model':[ExtraTreesClassifier()]},
             {'model':[SGDClassifier()]},
-            {'model':[XGBClassifier(use_label_encoder=False, eval_metric='logloss')]}
+            {'model': [XGBClassifier(eval_metric='logloss')]}
         ]
         scoring = "accuracy"
 
